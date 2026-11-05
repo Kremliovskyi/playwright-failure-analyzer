@@ -1,0 +1,49 @@
+{
+  "name": "@andrii_kremlovskyi/playwright-failure-analyzer",
+  "version": "0.1.0",
+  "description": "Evidence-based Playwright failure analysis with GitHub Copilot, for local tools and CI",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "playwright-failure-analyzer": "dist/cli.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0 <27"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.js",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "playwright",
+    "failure-analysis",
+    "github-copilot",
+    "ci",
+    "traces"
+  ],
+  "dependencies": {
+    "@andrii_kremlovskyi/playwright-traces-reader": "4.2.8",
+    "@github/copilot-sdk": "1.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "adm-zip": "^0.6.0",
+    "typescript": "~5.9.3"
+  }
+}
