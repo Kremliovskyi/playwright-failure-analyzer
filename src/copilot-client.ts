@@ -83,6 +83,20 @@ export function resolveAuthentication(
   };
 }
 
+export function runtimeEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  // Keep OS/login/proxy support, not application secrets, NODE_OPTIONS or provider overrides.
+  // PATHEXT is needed to discover gh.exe for stored GitHub CLI authentication on Windows.
+  return Object.fromEntries(
+    Object.entries(env).filter(([name]) =>
+      /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|TMP|TEMP|TMPDIR|APPDATA|LOCALAPPDATA|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|GH_HOST|GH_CONFIG_DIR)$/i.test(
+        name,
+      ),
+    ),
+  );
+}
+
 export async function usingClient<T>(
   authentication: AuthenticationOptions,
   callback: (
@@ -106,14 +120,6 @@ export async function usingClient<T>(
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "playwright-failure-analyzer-"),
   );
-  // Keep OS/login/proxy support, not application secrets, NODE_OPTIONS or provider overrides.
-  const environment = Object.fromEntries(
-    Object.entries(process.env).filter(([name]) =>
-      /^(PATH|SYSTEMROOT|WINDIR|COMSPEC|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|TMP|TEMP|TMPDIR|APPDATA|LOCALAPPDATA|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|GH_HOST|GH_CONFIG_DIR)$/i.test(
-        name,
-      ),
-    ),
-  );
   const options: CopilotClientOptions = {
     ...auth,
     connection: RuntimeConnection.forStdio(),
@@ -122,7 +128,7 @@ export async function usingClient<T>(
     baseDirectory: auth.useLoggedInUser
       ? process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot")
       : root,
-    env: environment,
+    env: runtimeEnvironment(),
     logLevel: "none",
   };
   const sdk = new CopilotClient(options);

@@ -109,6 +109,10 @@ CI disables stored-login fallback by default. Local usage supports existing CLI
 login; the package never starts an interactive login or stores a supplied token.
 Explicit `allowStoredLogin: false` is available for headless library consumers.
 
+The SDK reads local CLI credentials independently of VS Code's sign-in.
+On Windows, the isolated runtime preserves both `PATH` and `PATHEXT` so it can
+discover `gh.exe` and reuse GitHub CLI authentication.
+
 In GitHub Actions, pass `${{ github.token }}` through `COPILOT_GITHUB_TOKEN` and
 grant the job `copilot-requests: write`. Organization-owned repositories require
 the **Allow use of Copilot CLI billed to the organization** policy. This does not

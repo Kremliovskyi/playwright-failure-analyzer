@@ -2,19 +2,19 @@
 
 Date: 2026-11-02
 
-Status: package-only implementation and local validation complete; awaiting user publication.
+Status: user published 0.1.0; consumer implementation and local validation complete.
 
-Publishing gate (2026-11-05): prepare and validate the package locally, but do not
-publish it or integrate consumers. The user will publish the package and confirm
-before dashboard migration or CI integration begins. Packed-package consumer
-checks use isolated temporary projects, not changes to existing consumers.
+Publication was performed and confirmed by the user on 2026-11-05. Both consumers
+now pin the public npm release. No additional publication, commit, push, real
+regression run, or billable inference was performed during integration.
 
 ### Implementation outcome
 
 The package-only deliverable is version 0.1.0: the extracted schema-v4 engine,
 prepared-run API, full-report runner, and CLI are implemented. Coverage, workload
 limits, cancellation, tool-free sessions, and persistent partial/fatal results
-are included. Original engine files remain in the dashboard until migration.
+are included. The dashboard's duplicate source and algorithm tests have now been
+removed; its lifecycle and published-package integration tests remain.
 
 Implementation decisions:
 
@@ -28,9 +28,27 @@ Implementation decisions:
 - Keep live billable inference separate from synthetic tests. The earlier
   Actions CLI 1.0.105 check is not proof for the packaged SDK/runtime/models.
 
-Dashboard migration and regression workflow integration are paused until the
-user publishes and confirms. Source-repository setup and npm account/scope
-permissions remain owner-controlled publication steps.
+### Consumer validation (2026-11-05)
+
+- All 18 original engine tests passed against the installed npm package before
+  duplicate tests and source files were removed.
+- Dashboard: build and 42 affected integration/lifecycle tests passed on a clean
+  Linux installation; seven targeted browser workflows passed on Windows.
+- The user approved repair of the pre-existing dashboard lockfile inconsistency.
+  The SDK's compatible Zod dependency was also updated to a patched resolution.
+  Unrelated dependency audit findings remain outside this migration.
+- CI: clean Node 24 `npm ci --ignore-scripts` and the installed CLI passed.
+  Actionlint passed with only its unsupported `copilot-requests` permission
+  diagnostic excluded; that permission is documented by GitHub.
+- An actual generated Playwright 1.63.0 failing test verified that the CLI trace
+  override retains both failed retries despite project-level tracing being off.
+  The published analyzer prepared that report with complete retry coverage and
+  preserved a failed result for deliberately missing CI authentication.
+- All 32 scheduling combinations, exact artifact handoff, 30-minute deadline,
+  40-minute job timeout, absent attempt cap, and bounded count-only summaries
+  were checked. No real application data or model request was used.
+- The workflow still needs to be committed/pushed and dispatched. Live access
+  through the packaged SDK to both selected models remains a CI pilot check.
 
 ### Local release verification (2026-11-05)
 
@@ -434,7 +452,7 @@ success-shaped summary or silently swallow the write failure.
 
 ### Report application
 
-1. Install a locally packed candidate and change analysis imports to the package.
+1. Install the user-published release and change analysis imports to the package.
 2. Update the grouped-analysis constant imports in both vault modules.
 3. Preserve preflight-before-replacement, report UUID paths, shared preparation
    queue, active-analysis locks, and artifact ownership.
@@ -453,8 +471,12 @@ Release a validated package version and lock both consumers to the tested releas
 
 ### Regression CI
 
-Add an `analyzeFailures` dispatch checkbox, initially false. Keep existing test,
-artifact, and Pages behavior unchanged when it is false.
+Create the separate
+[Falcons workflow](../prod/sc-tests/.github/workflows/falcons-with-analysis.yml)
+with DEV/UAT/PROD and NA/EU dispatch choices and the `falcons` project.
+Its `analyzeFailures` checkbox defaults to false. Leave the existing regression
+workflow and Playwright configuration unchanged; do not add Pages deployment to
+this pilot.
 
 For opted-in runs:
 
@@ -478,10 +500,10 @@ For opted-in runs:
    count/status summary and artifact link; make skipped/missing-report cases
    explicit.
 
-Use repository variables for verified small/big model IDs. Set a package deadline
-shorter than the job timeout so finalization and artifact upload have time.
-Choose the actual workload/time budgets at the rollout gate rather than silently
-truncating large regression runs.
+The user selected hardcoded model IDs `gpt-6-luna` and `gpt-6.1-sol`, a 30-minute
+package deadline, a 40-minute analysis job timeout, and no attempt-count cap.
+Evidence processing was explicitly approved. Both report and analysis artifacts
+have one-day retention. Model IDs are never silently substituted.
 
 The initial workflow policy is failed test runs only. The engine still analyzes
 failed retries within those reports. Analysis of an otherwise green flaky run

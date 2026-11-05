@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   resolveAuthentication,
   evidenceSessionConfig,
+  runtimeEnvironment,
 } = require("../dist/copilot-client");
 const clientModule = require("../dist/copilot-client");
 const { withCopilotAnalysisClient } = require("../dist/copilot-analyzer");
@@ -34,6 +35,33 @@ test("token precedence and local/CI defaults are explicit", () => {
     /non-interactive/,
   );
   assert.throws(() => resolveAuthentication({ token: " " }, {}), /empty/);
+});
+
+test("runtime preserves Windows CLI discovery without forwarding secrets or overrides", () => {
+  for (const extensionKey of ["PATHEXT", "PathExt"]) {
+    const preserved = {
+      Path: "C:\\Windows\\System32;C:\\Program Files\\GitHub CLI",
+      [extensionKey]: ".COM;.EXE;.BAT;.CMD",
+      SystemRoot: "C:\\Windows",
+      USERPROFILE: "C:\\Users\\test",
+      APPDATA: "C:\\Users\\test\\AppData\\Roaming",
+      GH_CONFIG_DIR: "C:\\gh-config",
+      HTTPS_PROXY: "http://proxy.example:8080",
+    };
+    assert.deepEqual(
+      runtimeEnvironment({
+        ...preserved,
+        COPILOT_GITHUB_TOKEN: "synthetic-copilot-token",
+        GH_TOKEN: "synthetic-gh-token",
+        GITHUB_TOKEN: "synthetic-actions-token",
+        ENCRYPTION_KEY: "synthetic-app-secret",
+        NODE_OPTIONS: "--require injected.js",
+        COPILOT_PROVIDER_BASE_URL: "https://provider.example",
+        COPILOT_PROVIDER_API_KEY: "synthetic-provider-key",
+      }),
+      preserved,
+    );
+  }
 });
 
 test("both stages use tool-free isolated session configuration", () => {
