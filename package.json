@@ -1,6 +1,6 @@
 {
   "name": "@andrii_kremlovskyi/playwright-failure-analyzer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Evidence-based Playwright failure analysis with GitHub Copilot, for local tools and CI",
   "license": "MIT",
   "type": "commonjs",

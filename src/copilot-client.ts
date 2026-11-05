@@ -160,10 +160,9 @@ export async function usingClient<T>(
             on: (handler) => session.on(handler),
             disconnect: async () => {
               if (signal?.aborted) return; // The owned runtime is being forcibly stopped.
-              await withCleanup(
-                () => session.disconnect(),
-                () => sdk.deleteSession(session.sessionId),
-              );
+              // deleteSession searches baseDirectory, not the isolated session configDirectory.
+              // The owned session files are removed below, after the runtime stops.
+              await session.disconnect();
             },
           };
         },

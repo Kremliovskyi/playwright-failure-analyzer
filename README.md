@@ -301,6 +301,10 @@ configuration discovery, and run in an isolated working directory. This limits
 agent actions; it does not make sensitive evidence safe to disclose. BYOK/provider
 environment overrides are not forwarded to the owned runtime.
 
+Session state stays in an owned temporary configuration directory, which is
+removed after the sessions disconnect and the runtime stops. Local login
+configuration is kept separate and is not deleted during analysis cleanup.
+
 Screenshots can be extracted for human inspection, but are not automatically
 submitted for visual analysis. Global setup/infrastructure errors and failures
 without trace evidence are not diagnosed by a report-only model fallback.
@@ -314,9 +318,11 @@ npm pack --dry-run
 npm pack
 ```
 
-Tests use generated reports and fake model clients. The runtime smoke test starts
-the bundled runtime and requests local status only, using a synthetic credential;
-it performs no model inference. No real reports or credentials belong in fixtures.
+Tests use generated reports and fake model clients. Real-runtime checks cover
+startup and concurrent session creation/disconnection with both explicit-token
+and separate local-login storage. They use synthetic credentials and an inert
+loopback provider, verify temporary-state cleanup, and make no model inference
+requests. No real reports or credentials belong in fixtures.
 
 Release checks cover Windows (Node 22) and Linux (Node 24), including independent
 tarball installation, CommonJS/ESM imports, declarations, the executable, and
