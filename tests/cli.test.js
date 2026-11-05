@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
+const { version } = require("../package.json");
 const { fixture } = require("./fixture.cjs");
 
 const cli = path.resolve(__dirname, "../dist/cli.js");
@@ -21,7 +22,7 @@ function run(args) {
 
 test("CLI help/version work without credentials", () => {
   assert.match(run(["--help"]).stdout, /Usage:/);
-  assert.equal(run(["--version"]).stdout.trim(), "0.1.0");
+  assert.equal(run(["--version"]).stdout.trim(), version);
 });
 
 test("CLI rejects invalid arguments as machine-readable errors", () => {

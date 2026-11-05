@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
+const { version } = require("../package.json");
 
 test(
   "packed package installs independently with CJS, ESM, types and npm executable",
@@ -82,7 +83,7 @@ test(
     assert.equal(esm.status, 0, esm.stderr);
     assert.equal(
       command(npm, ["run", "--silent", "check-cli"], consumer).trim(),
-      "0.1.0",
+      version,
     );
     const ts = path.join(consumer, "consumer.ts");
     fs.writeFileSync(
