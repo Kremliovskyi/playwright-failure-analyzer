@@ -66,7 +66,7 @@ test(
       process.execPath,
       [
         "-e",
-        `const p = require('${name}'); if (typeof p.analyzeFailures !== 'function' || p.EVIDENCE_SCHEMA_VERSION !== 4) process.exit(1)`,
+        `const p = require('${name}'); if (typeof p.analyzeFailures !== 'function' || typeof p.createAnalysisRunDirectory !== 'function' || typeof p.validateAnalysisContext !== 'function' || p.ANALYSIS_RESULT_SCHEMA_VERSION !== 2 || p.EVIDENCE_SCHEMA_VERSION !== 4) process.exit(1)`,
       ],
       { cwd: consumer, encoding: "utf8" },
     );
@@ -76,7 +76,7 @@ test(
       [
         "--input-type=module",
         "-e",
-        `import {analyzeFailures, EVIDENCE_SCHEMA_VERSION} from '${name}'; if (typeof analyzeFailures !== 'function' || EVIDENCE_SCHEMA_VERSION !== 4) process.exit(1);`,
+        `import {analyzeFailures, createAnalysisRunDirectory, validateAnalysisContext, ANALYSIS_RESULT_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION} from '${name}'; if (typeof analyzeFailures !== 'function' || typeof createAnalysisRunDirectory !== 'function' || typeof validateAnalysisContext !== 'function' || ANALYSIS_RESULT_SCHEMA_VERSION !== 2 || EVIDENCE_SCHEMA_VERSION !== 4) process.exit(1);`,
       ],
       { cwd: consumer, encoding: "utf8" },
     );
@@ -88,10 +88,17 @@ test(
     const ts = path.join(consumer, "consumer.ts");
     fs.writeFileSync(
       ts,
-      `import { analyzeFailures, type AnalysisOptions, type FailureManifest } from '${name}';
-const options: AnalysisOptions = { reportPath: 'report', outputDir: 'out', smallModel: 'small', bigModel: 'big' };
+      `import { analyzeFailures, renderSummary, type AnalysisOptions, type AnalysisClient, type AnalysisContext, type LegacyAnalysisResult, type FailureManifest } from '${name}';
+declare const client: AnalysisClient;
+declare const legacy: LegacyAnalysisResult;
+const context: AnalysisContext = { source: { kind: 'playwright-reports', reportUuid: 'report-uuid' }, environment: 'DEV', region: 'NA' };
+const options: AnalysisOptions = {
+  reportPath: 'report', outputDir: 'out', smallModel: 'small', bigModel: 'big', client, context,
+  schedulePreparation: prepare => prepare(),
+  onPrepared: run => { const name: string = run.runId; const date: string = run.createdAt; void name; void date; },
+};
 const manifest: FailureManifest = { count: 0, runDir: 'run', failures: [] };
-void manifest; void analyzeFailures; void options;`,
+void manifest; void analyzeFailures; void options; void (() => renderSummary(legacy));`,
     );
     command(
       require.resolve("typescript/bin/tsc"),

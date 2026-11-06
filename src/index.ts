@@ -1,5 +1,6 @@
 export {
   analyzeFailures,
+  createAnalysisRunDirectory,
   FailureAnalysisError,
   renderSummary,
   ANALYSIS_RESULT_FILENAME,
@@ -8,9 +9,14 @@ export {
 } from "./analysis";
 export type {
   AnalysisOptions,
+  AnalysisRunIdentity,
+  PreparedAnalysis,
   AnalysisProgress,
   AnalysisResult,
+  LegacyAnalysisResult,
 } from "./analysis";
+export { validateAnalysisContext } from "./analysis-context";
+export type { AnalysisContext, AnalysisSource } from "./analysis-context";
 export {
   analyzeRun,
   withCopilotAnalysisClient,

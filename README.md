@@ -52,16 +52,17 @@ npx playwright-failure-analyzer analyze \
 For PowerShell, put the command on one line or use PowerShell continuation syntax.
 Quote paths containing spaces.
 
-| Option                          | Behavior                                                                 |
-| ------------------------------- | ------------------------------------------------------------------------ |
-| `--report`                      | HTML report root, containing `index.html`                                |
-| `--output`                      | Parent directory for a fresh `run-*` output; must not overlap the report |
-| `--small-model` / `--big-model` | Required exact model IDs; never silently substituted                     |
-| `--workers`                     | Reader preparation workers, 1-5; default 4                               |
-| `--concurrency`                 | Concurrent attempt analyses; default 3                                   |
-| `--timeout-ms`                  | Optional overall deadline, including preparation and AI stages           |
-| `--max-attempts`                | Optional cap in manifest order; omissions make the result partial        |
-| `--format`                      | `json` (default) or `text`                                               |
+| Option                          | Behavior                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------------------ |
+| `--report`                      | HTML report root, containing `index.html`                                            |
+| `--output`                      | Parent directory for a fresh `run-*` output; must not overlap the report             |
+| `--small-model` / `--big-model` | Required exact model IDs; never silently substituted                                 |
+| `--workers`                     | Reader preparation workers, 1-5; default 4                                           |
+| `--concurrency`                 | Concurrent attempt analyses; default 3                                               |
+| `--timeout-ms`                  | Optional overall deadline, including preparation and AI stages                       |
+| `--max-attempts`                | Optional cap in manifest order; omissions make the result partial                    |
+| `--context`                     | Optional JSON file, at most 16 KiB, with explicit source/environment/region metadata |
+| `--format`                      | `json` (default) or `text`                                                           |
 
 No overall deadline or attempt cap is imposed unless configured. Always set a
 deadline shorter than the workflow job timeout in CI. Each attempt request has a
@@ -87,7 +88,7 @@ nonzero.
 
 | Exit code | Meaning                                                                       |
 | --------- | ----------------------------------------------------------------------------- |
-| 0         | Complete analysis (possibly with warnings) or verified no failures           |
+| 0         | Complete analysis (possibly with warnings) or verified no failures            |
 | 1         | Invalid arguments, authentication failure, fatal preparation/output error     |
 | 2         | Partial analysis, missing/unknown coverage, source-only fallback, or deadline |
 | 130 / 143 | SIGINT / SIGTERM cancellation                                                 |
@@ -173,14 +174,102 @@ allocated throw `FailureAnalysisError`, whose `result` points to retained output
 Earlier input/preparation setup errors can occur before any run is allocated.
 Output failures are never disguised as successful analysis.
 
+`context` accepts `source`, `environment`, and `region`. The source defaults to
+`{ kind: "cli" }`; environment and region remain absent unless supplied. The
+package never derives this context from directory names, test titles, or process
+environment variables. Unknown fields, empty/overlong strings, control
+characters, invalid source kinds, and invalid workflow-attempt numbers are
+rejected before output allocation. `validateAnalysisContext` is also exported
+for callers validating their input.
+
+For example, `--context "analysis context.json"` can read:
+
+```json
+{
+  "source": {
+    "kind": "github-actions",
+    "repository": "example/tests",
+    "runId": "123",
+    "runAttempt": 1,
+    "commit": "abc123",
+    "reportArtifactId": "456"
+  },
+  "environment": "DEV",
+  "region": "NA"
+}
+```
+
+GitHub source identifiers are optional; include only known values. Workflow run
+and artifact IDs are strings; `runAttempt` is a positive safe integer.
+The `playwright-reports` source requires `reportUuid` and accepts an optional
+`reportName`. Neither source changes the canonical analysis directory name.
+Context is persisted in restricted result JSON, not the count-only summary.
+Do not put credentials or arbitrary environment snapshots in it.
+
 An `AbortSignal` cancels the high-level runner, stops new work, and shuts down
 its owned reader process tree and SDK runtime. Already completed evidence is
 retained. Cancellation during preparation can leave incomplete raw evidence
 inside that run; it is not a completed manifest.
 
+### Dashboard lifecycle without a second bundle format
+
+Use the same `analyzeFailures` entry point for a dashboard and the CLI. It owns
+canonical run allocation, preparation, attempt analysis, grouping, and terminal
+result/summary persistence. A dashboard can retain its queue, registration, and
+preflight-before-replacement lifecycle:
+
+```ts
+await withCopilotAnalysisClient(
+  { smallModel, bigModel },
+  optionalToken,
+  async (client) => {
+    // Perform confirmed replacement and report-instance checks after preflight.
+    return analyzeFailures({
+      reportPath,
+      outputDir: reportOwnedAnalysisParent,
+      smallModel,
+      bigModel,
+      client,
+      context: {
+        source: { kind: "playwright-reports", reportUuid, reportName },
+        environment,
+        region,
+      },
+      schedulePreparation: (prepare) => withReportPreparation(prepare),
+      onPrepared: ({ runDir, runId, createdAt }) =>
+        registerRun({ reportUuid, runDir, runName: runId, createdAt }),
+      onProgress,
+      signal,
+    });
+  },
+  { signal },
+);
+```
+
+- A supplied `client` must already have passed the caller's authentication/model
+  preflight. It is caller-owned; the runner neither starts a second runtime nor
+  closes that client. Do not supply `authentication` together with `client`.
+- `schedulePreparation` must invoke the supplied preparation operation exactly
+  once and await it. The operation checks cancellation before starting, and the
+  engine awaits its own result rather than accepting a replacement manifest
+  from the scheduler. This includes empty-manifest preparation for green runs.
+  Both hooks receive the effective `AbortSignal` as a second argument. Deadlines
+  apply while queued; an operation invoked after cancellation cannot start work.
+- `onPrepared` runs after manifest validation and before any model requests. It
+  receives the canonical identity and a manifest snapshot; mutating the snapshot
+  does not change engine state. Awaited registration failures preserve a failed
+  result instead of proceeding with analysis. Registration must settle before
+  finalization; asynchronous registration should honor the supplied signal.
+- Neither hook authorizes deleting previous output. Confirmation, ownership,
+  report-instance checks, database associations, and vault/archive lifecycle
+  remain the application's responsibility.
+- The application can retain its report UUID in the ownership parent, such as
+  `tmp/analysis-<reportUuid>/`, without appending it to the canonical run name.
+
 ### Reusing prepared evidence
 
-Applications that own report preparation and artifact lifecycle can use:
+The existing low-level APIs remain available for applications that only need
+attempt evidence and grouping:
 
 ```ts
 import {
@@ -221,6 +310,8 @@ await withCopilotAnalysisClient(
 
 Prepared-run APIs write only their own evidence/grouping files and refuse
 conflicting output. They do not replace/delete prior runs or manage report IDs.
+They do not write the shared result/summary envelope; use the high-level runner
+above when producing a complete interoperable analysis bundle.
 The client wrapper owns runtime shutdown; when supplying another `AnalysisClient`,
 the caller must arrange cancellation of active requests and client cleanup.
 
@@ -232,7 +323,7 @@ exported. Importing the package does not start the runtime.
 
 ```text
 failure-analysis/
-  run-<unique-id>/
+  run-<UTC timestamp>-<random suffix>/
     index.json
     analysis-result.json
     summary.md
@@ -245,8 +336,16 @@ failure-analysis/
       ...raw reader evidence
 ```
 
+- Run names use one UTC creation timestamp with colons and the decimal point
+  replaced by hyphens, followed by an exclusive random suffix. Example:
+  `run-2026-11-06T15-04-05-123Z-a1B2c3`. They never include a producer-specific
+  report UUID. `createAnalysisRunDirectory(outputDir)` exposes the same allocator
+  for callers needing only a fresh directory and its identity.
 - Reader manifests keep schema version 2; canonical AI evidence keeps schema
-  version 4. The new run envelope has schema version 1.
+  version 4. The result envelope now has schema version 2, adding `runId`,
+  `createdAt`, `source`, and optional `environment`/`region`. `runId` is the exact
+  directory basename; `createdAt` is its ISO UTC creation time, not the source
+  test date or extraction time.
 - `error.md` is ground truth. Each fenced Error details block remains an exact,
   ordered source issue in `evidence.json`.
 - Invalid model output gets one correction; a second invalid response retains
@@ -273,6 +372,24 @@ failure-analysis/
 - Artifact pointers are relative to the run directory. `runDir` and original
   reader trace paths describe the machine that produced them; do not trust them
   as filesystem authority after downloading an artifact.
+- Resolve a supplied grouped report against its actual parent manifest, not its
+  historical absolute header path. Require an explicitly supplied matching root
+  if the grouped report has been detached. `validateManifest(value, localRoot)`
+  validates folders against that local root and does not trust embedded paths.
+- Legacy random-only CI and timestamp-plus-report-UUID dashboard directories
+  remain valid inputs; do not rename or rewrite them. Consumers should accept
+  result schema v1 and missing legacy dashboard result metadata. The exported
+  `LegacyAnalysisResult` type and `renderSummary` support v1 results. Missing
+  completion metadata means unknown, not complete.
+- For legacy runs lacking a reliable timestamp, ask for a verified analysis date;
+  never substitute extraction time or infer an ambiguous date from a test title.
+- Grouping remains conditional for zero/single-attempt runs. Preparation failure
+  can leave only the result and summary, without a valid manifest. Hard process
+  termination can interrupt persistence entirely; missing terminal files never
+  establish success.
+- Keep GitHub artifact wrappers and dashboard ownership parents outside this
+  bundle contract. Upload the whole output parent to retain exactly one canonical
+  run directory for a single invocation, including partial output.
 
 ## GitHub Actions consumption
 

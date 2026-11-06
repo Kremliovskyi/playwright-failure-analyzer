@@ -14,7 +14,12 @@ import {
   GroupingRunError,
   type GroupRunResult,
 } from "./copilot-grouper";
-import type { AuthenticationOptions } from "./copilot-client";
+import type { AnalysisClient, AuthenticationOptions } from "./copilot-client";
+import {
+  validateAnalysisContext,
+  type AnalysisContext,
+  type AnalysisSource,
+} from "./analysis-context";
 import {
   inspectReport,
   measureCoverage,
@@ -32,7 +37,17 @@ import {
 
 export const ANALYSIS_RESULT_FILENAME = "analysis-result.json";
 export const SUMMARY_FILENAME = "summary.md";
-export const ANALYSIS_RESULT_SCHEMA_VERSION = 1;
+export const ANALYSIS_RESULT_SCHEMA_VERSION = 2;
+
+export interface AnalysisRunIdentity {
+  runDir: string;
+  runId: string;
+  createdAt: string;
+}
+
+export interface PreparedAnalysis extends AnalysisRunIdentity {
+  manifest: FailureManifest;
+}
 
 export interface AnalysisOptions {
   reportPath: string;
@@ -40,6 +55,16 @@ export interface AnalysisOptions {
   smallModel: string;
   bigModel: string;
   authentication?: AuthenticationOptions;
+  client?: AnalysisClient;
+  context?: AnalysisContext;
+  schedulePreparation?: (
+    prepare: () => Promise<FailureManifest>,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
+  onPrepared?: (
+    run: PreparedAnalysis,
+    signal: AbortSignal,
+  ) => void | Promise<void>;
   workers?: number;
   concurrency?: number;
   timeoutMs?: number;
@@ -52,10 +77,12 @@ export type AnalysisProgress =
   | { phase: "preparation" | "grouping" | "complete" }
   | { phase: "analysis"; progress: AnalyzeProgress };
 
-export interface AnalysisResult {
+export interface AnalysisResult extends AnalysisRunIdentity {
   schemaVersion: typeof ANALYSIS_RESULT_SCHEMA_VERSION;
   status: "complete" | "no-failures" | "partial" | "failed" | "cancelled";
-  runDir: string;
+  source: AnalysisSource;
+  environment?: string;
+  region?: string;
   coverage: Coverage;
   attempts: {
     total: number;
@@ -89,6 +116,25 @@ export interface AnalysisResult {
     groupedAnalysis?: string;
     attempts: string[];
   };
+}
+
+export type LegacyAnalysisResult = Omit<
+  AnalysisResult,
+  "schemaVersion" | "runId" | "createdAt" | "source" | "environment" | "region"
+> & { schemaVersion: 1 };
+
+export function createAnalysisRunDirectory(
+  outputDir: string,
+): AnalysisRunIdentity {
+  if (typeof outputDir !== "string" || !outputDir.trim())
+    throw new AnalysisError("INVALID_OPTIONS", "outputDir is required.");
+  const output = path.resolve(outputDir);
+  fs.mkdirSync(output, { recursive: true });
+  const createdAt = new Date().toISOString();
+  const runDir = fs.mkdtempSync(
+    path.join(output, `run-${createdAt.replace(/[:.]/g, "-")}-`),
+  );
+  return { runDir, runId: path.basename(runDir), createdAt };
 }
 
 export class FailureAnalysisError extends AnalysisError {
@@ -139,7 +185,9 @@ function groupingEvidenceWarning(
   return `Optional grouping evidence refinement failed. ${reason} The saved grouping remains provisional. See the restricted diagnostics for details.`;
 }
 
-export function renderSummary(result: AnalysisResult): string {
+export function renderSummary(
+  result: AnalysisResult | LegacyAnalysisResult,
+): string {
   const evidenceWarning = result.artifacts.groupedAnalysis
     ? groupingEvidenceWarning(result.grouping.diagnostics)
     : undefined;
@@ -218,12 +266,35 @@ export function validateOptions(options: AnalysisOptions): void {
     positiveInteger(options.timeoutMs, "timeoutMs");
   if (options.maxAttempts !== undefined)
     positiveInteger(options.maxAttempts, "maxAttempts");
+  validateAnalysisContext(options.context === undefined ? {} : options.context);
+  if (options.client !== undefined) {
+    if (!options.client || typeof options.client.createSession !== "function")
+      throw new AnalysisError(
+        "INVALID_OPTIONS",
+        "client must be an AnalysisClient.",
+      );
+    if (options.authentication !== undefined)
+      throw new AnalysisError(
+        "INVALID_OPTIONS",
+        "Supply either client or authentication, not both.",
+      );
+  }
+  for (const field of ["schedulePreparation", "onPrepared"] as const) {
+    if (options[field] !== undefined && typeof options[field] !== "function")
+      throw new AnalysisError(
+        "INVALID_OPTIONS",
+        `${field} must be a function.`,
+      );
+  }
 }
 
 export async function analyzeFailures(
   options: AnalysisOptions,
 ): Promise<AnalysisResult> {
   validateOptions(options);
+  const context = validateAnalysisContext(
+    options.context === undefined ? {} : options.context,
+  );
   const startedAt = Date.now();
   const controller = new AbortController();
   const cancel = () =>
@@ -270,12 +341,13 @@ export async function analyzeFailures(
       runDir: "",
       failures: [],
     });
-    fs.mkdirSync(input.outputPath, { recursive: true });
-    const runDir = fs.mkdtempSync(path.join(input.outputPath, "run-"));
+    const identity = createAnalysisRunDirectory(input.outputPath);
+    const { runDir } = identity;
     result = {
       schemaVersion: ANALYSIS_RESULT_SCHEMA_VERSION,
       status: "complete",
-      runDir,
+      ...identity,
+      ...context,
       coverage: initialCoverage,
       attempts: {
         total: 0,
@@ -297,35 +369,87 @@ export async function analyzeFailures(
         attempts: [],
       },
     };
-    let manifest: FailureManifest;
-    if (
-      (initialCoverage.known && initialCoverage.failedAttempts === 0) ||
-      !fs.existsSync(path.join(input.reportPath, "data"))
-    ) {
-      manifest = { runDir, count: 0, failures: [] };
-      writeNewFile(
-        runDir,
-        "index.json",
-        JSON.stringify(
-          {
-            schemaVersion: 2,
-            command: "failures",
-            outputDir: input.outputPath,
-            ...manifest,
-          },
-          null,
-          2,
-        ) + "\n",
-      );
-    } else {
-      manifest = await prepareReport(
-        input.reportPath,
-        runDir,
-        options.workers ?? 4,
-        signal,
-      );
+    let preparation: Promise<FailureManifest> | undefined;
+    const preparationController = new AbortController();
+    const preparationSignal = AbortSignal.any([
+      signal,
+      preparationController.signal,
+    ]);
+    const prepare = () => {
+      if (preparation)
+        throw new AnalysisError(
+          "PREPARATION_FAILED",
+          "Preparation must be scheduled exactly once.",
+        );
+      preparation = (async () => {
+        assertNotAborted(preparationSignal);
+        if (
+          (initialCoverage.known && initialCoverage.failedAttempts === 0) ||
+          !fs.existsSync(path.join(input.reportPath, "data"))
+        ) {
+          const manifest = { runDir, count: 0, failures: [] };
+          writeNewFile(
+            runDir,
+            "index.json",
+            JSON.stringify(
+              {
+                schemaVersion: 2,
+                command: "failures",
+                outputDir: input.outputPath,
+                ...manifest,
+              },
+              null,
+              2,
+            ) + "\n",
+          );
+          return manifest;
+        }
+        return prepareReport(
+          input.reportPath,
+          runDir,
+          options.workers ?? 4,
+          preparationSignal,
+        );
+      })();
+      return preparation;
+    };
+    let abortQueue: (() => void) | undefined;
+    try {
+      const queued = options.schedulePreparation
+        ? options.schedulePreparation(prepare, signal)
+        : prepare();
+      await Promise.race([
+        queued,
+        new Promise<never>((_, reject) => {
+          abortQueue = () => reject(signal.reason);
+          signal.addEventListener("abort", abortQueue, { once: true });
+          if (signal.aborted) abortQueue();
+        }),
+      ]);
+    } catch (error) {
+      if (preparation) {
+        // A failed queue callback must not leave a reader writing after finalization.
+        preparationController.abort(error);
+        try {
+          await preparation;
+        } catch (preparationError) {
+          if (preparationError !== error)
+            throw new AggregateError(
+              [error, preparationError],
+              `${messageOf(error)}; preparation failed: ${messageOf(preparationError)}`,
+            );
+        }
+      }
+      throw error;
+    } finally {
+      if (abortQueue) signal.removeEventListener("abort", abortQueue);
     }
-    manifest = validateManifest(manifest, manifest.runDir);
+    if (!preparation)
+      throw new AnalysisError(
+        "PREPARATION_FAILED",
+        "The preparation scheduler did not run preparation.",
+      );
+    const manifest = validateManifest(await preparation, runDir);
     const coverage = measureCoverage(input.metadata, manifest);
     const candidates = manifest.failures.filter(isAnalyzableEntry);
     result.coverage = coverage;
@@ -334,124 +458,140 @@ export async function analyzeFailures(
     result.attempts.excluded = manifest.count - candidates.length;
     result.warnings = [...coverage.warnings];
     result.artifacts.manifest = "index.json";
-    if (candidates.length) {
-      stage = "authentication";
-      const current = result;
-      await withCopilotAnalysisClient(
-        current.models,
-        options.authentication?.token,
-        async (client) => {
-          stage = "analysis";
-          const analysis = await analyzeRun(
-            client,
-            manifest.runDir,
-            manifest,
-            options.smallModel,
-            (progress) => options.onProgress?.({ phase: "analysis", progress }),
-            {
-              signal,
-              concurrency: options.concurrency,
-              maxAttempts: options.maxAttempts,
-            },
-          );
-          current.attempts.analyzed = analysis.analyzed;
-          current.attempts.unavailable = analysis.failed;
-          current.attempts.omitted = analysis.omitted;
-          current.attempts.fallbacks = analysis.records.filter(
-            (record) => record.warning,
-          ).length;
-          if (analysis.usage) current.attemptUsage = analysis.usage;
-          current.artifacts.attempts = analysis.records.map(
-            (record) => record.attempt.folder,
-          );
-          for (const record of analysis.records) {
-            if (record.error)
-              current.errors.push({
-                stage: "analysis",
-                code: "ATTEMPT_FAILED",
-                message: record.error,
-              });
-            if (record.warning) current.warnings.push(record.warning);
-          }
-          if (analysis.omitted)
-            current.warnings.push(
-              `${analysis.omitted} attempt(s) were not analyzed.`,
-            );
-          if (signal.aborted) return;
-          if (
-            candidates.length > 1 &&
-            analysis.records.some((record) => record.issues.length)
-          ) {
-            stage = "grouping";
-            options.onProgress?.({ phase: "grouping" });
-            const folders = new Set(
-              analysis.records.map((record) => record.attempt.folder),
-            );
-            const records: UnderstandingRecord[] = [
-              ...analysis.records,
-              ...candidates
-                .filter((entry) => !folders.has(entry.folder))
-                .map((entry) => ({
-                  schemaVersion: 4 as const,
-                  model: options.smallModel,
-                  attempt: { ...entry, spec: "" },
-                  issues: [],
-                  error: "Attempt not analyzed within the configured budget.",
-                })),
-            ];
-            try {
-              const grouping = await groupRun(
-                client,
-                manifest.runDir,
-                manifest,
-                records,
-                options.smallModel,
-                options.bigModel,
-                { signal },
-              );
-              const d = grouping.diagnostics;
-              const evidenceWarning = groupingEvidenceWarning(d);
-              incompleteGrouping = !!(
-                d.repairErrorMessage !== undefined ||
-                d.omittedIssueCountAfterRepair ||
-                d.unknownIssueCountAfterRepair ||
-                d.duplicateIssueCountAfterRepair
-              );
-              const partial = !!(
-                evidenceWarning ||
-                incompleteGrouping ||
-                analysis.failed ||
-                analysis.omitted
-              );
-              current.grouping = {
-                status: partial ? "partial" : "complete",
-                problemCount: grouping.problemCount,
-                diagnostics: d,
-              };
-              current.artifacts.groupedAnalysis = grouping.fileName;
-              if (incompleteGrouping || analysis.failed || analysis.omitted)
-                current.warnings.push(
-                  "Grouping retained partial or provisional evidence; inspect diagnostics.",
-                );
-              if (evidenceWarning) current.warnings.push(evidenceWarning);
-            } catch (error) {
-              current.grouping = {
-                status: "failed",
-                diagnostics:
-                  error instanceof GroupingRunError
-                    ? error.diagnostics
-                    : undefined,
-              };
-              current.errors.push({
-                stage,
-                code: "GROUPING_FAILED",
-                message: messageOf(error),
-              });
-            }
-          }
-        },
-        { signal, allowStoredLogin: options.authentication?.allowStoredLogin },
+    assertNotAborted(signal);
+    if (options.onPrepared) {
+      stage = "registration";
+      await options.onPrepared(
+        { ...identity, manifest: structuredClone(manifest) },
+        signal,
       );
+      assertNotAborted(signal);
+    }
+    if (candidates.length) {
+      const current = result;
+      const analyze = async (client: AnalysisClient) => {
+        stage = "analysis";
+        const analysis = await analyzeRun(
+          client,
+          manifest.runDir,
+          manifest,
+          options.smallModel,
+          (progress) => options.onProgress?.({ phase: "analysis", progress }),
+          {
+            signal,
+            concurrency: options.concurrency,
+            maxAttempts: options.maxAttempts,
+          },
+        );
+        current.attempts.analyzed = analysis.analyzed;
+        current.attempts.unavailable = analysis.failed;
+        current.attempts.omitted = analysis.omitted;
+        current.attempts.fallbacks = analysis.records.filter(
+          (record) => record.warning,
+        ).length;
+        if (analysis.usage) current.attemptUsage = analysis.usage;
+        current.artifacts.attempts = analysis.records.map(
+          (record) => record.attempt.folder,
+        );
+        for (const record of analysis.records) {
+          if (record.error)
+            current.errors.push({
+              stage: "analysis",
+              code: "ATTEMPT_FAILED",
+              message: record.error,
+            });
+          if (record.warning) current.warnings.push(record.warning);
+        }
+        if (analysis.omitted)
+          current.warnings.push(
+            `${analysis.omitted} attempt(s) were not analyzed.`,
+          );
+        if (signal.aborted) return;
+        if (
+          candidates.length > 1 &&
+          analysis.records.some((record) => record.issues.length)
+        ) {
+          stage = "grouping";
+          options.onProgress?.({ phase: "grouping" });
+          const folders = new Set(
+            analysis.records.map((record) => record.attempt.folder),
+          );
+          const records: UnderstandingRecord[] = [
+            ...analysis.records,
+            ...candidates
+              .filter((entry) => !folders.has(entry.folder))
+              .map((entry) => ({
+                schemaVersion: 4 as const,
+                model: options.smallModel,
+                attempt: { ...entry, spec: "" },
+                issues: [],
+                error: "Attempt not analyzed within the configured budget.",
+              })),
+          ];
+          try {
+            const grouping = await groupRun(
+              client,
+              manifest.runDir,
+              manifest,
+              records,
+              options.smallModel,
+              options.bigModel,
+              { signal },
+            );
+            const d = grouping.diagnostics;
+            const evidenceWarning = groupingEvidenceWarning(d);
+            incompleteGrouping = !!(
+              d.repairErrorMessage !== undefined ||
+              d.omittedIssueCountAfterRepair ||
+              d.unknownIssueCountAfterRepair ||
+              d.duplicateIssueCountAfterRepair
+            );
+            const partial = !!(
+              evidenceWarning ||
+              incompleteGrouping ||
+              analysis.failed ||
+              analysis.omitted
+            );
+            current.grouping = {
+              status: partial ? "partial" : "complete",
+              problemCount: grouping.problemCount,
+              diagnostics: d,
+            };
+            current.artifacts.groupedAnalysis = grouping.fileName;
+            if (incompleteGrouping || analysis.failed || analysis.omitted)
+              current.warnings.push(
+                "Grouping retained partial or provisional evidence; inspect diagnostics.",
+              );
+            if (evidenceWarning) current.warnings.push(evidenceWarning);
+          } catch (error) {
+            current.grouping = {
+              status: "failed",
+              diagnostics:
+                error instanceof GroupingRunError
+                  ? error.diagnostics
+                  : undefined,
+            };
+            current.errors.push({
+              stage,
+              code: "GROUPING_FAILED",
+              message: messageOf(error),
+            });
+          }
+        }
+      };
+      if (options.client) await analyze(options.client);
+      else {
+        stage = "authentication";
+        await withCopilotAnalysisClient(
+          current.models,
+          options.authentication?.token,
+          analyze,
+          {
+            signal,
+            allowStoredLogin: options.authentication?.allowStoredLogin,
+          },
+        );
+      }
     }
     if (signal.aborted) {
       result.warnings.push(messageOf(signal.reason));

@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { analyzeFailures, FailureAnalysisError } from "./analysis";
+import {
+  validateAnalysisContext,
+  type AnalysisContext,
+} from "./analysis-context";
 import { copilotAccessCheck, copilotModels } from "./copilot-analyzer";
 import { AnalysisError, messageOf } from "./shared";
 
@@ -10,7 +14,7 @@ const help = `Usage:
   playwright-failure-analyzer analyze --report <root> --output <parent>
     --small-model <id> --big-model <id> [--workers <1-5>]
     [--concurrency <n>] [--timeout-ms <ms>] [--max-attempts <n>]
-    [--format json|text]
+    [--context <json-file>] [--format json|text]
   playwright-failure-analyzer check-access [--format json|text]
   playwright-failure-analyzer models [--format json|text]
   playwright-failure-analyzer --help | --version
@@ -62,6 +66,7 @@ export async function runCli(args = process.argv.slice(2)): Promise<number> {
         concurrency: { type: "string" },
         "timeout-ms": { type: "string" },
         "max-attempts": { type: "string" },
+        context: { type: "string" },
         format: { type: "string", default: "json" },
       },
     });
@@ -138,11 +143,34 @@ export async function runCli(args = process.argv.slice(2)): Promise<number> {
         );
       return Number(text);
     };
+    let context: AnalysisContext | undefined;
+    if (values.context !== undefined) {
+      const stat = fs.statSync(values.context);
+      if (!stat.isFile() || stat.size > 16 * 1024)
+        throw new AnalysisError(
+          "INVALID_OPTIONS",
+          "Context must be a JSON file no larger than 16 KiB.",
+        );
+      let input: unknown;
+      try {
+        input = JSON.parse(fs.readFileSync(values.context, "utf8"));
+      } catch (error) {
+        if (error instanceof SyntaxError)
+          throw new AnalysisError(
+            "INVALID_OPTIONS",
+            "Context must contain valid JSON.",
+            { cause: error },
+          );
+        throw error;
+      }
+      context = validateAnalysisContext(input);
+    }
     const result = await analyzeFailures({
       reportPath: values.report ?? "",
       outputDir: values.output ?? "",
       smallModel: values["small-model"] ?? "",
       bigModel: values["big-model"] ?? "",
+      context,
       workers: numeric("workers"),
       concurrency: numeric("concurrency"),
       timeoutMs: numeric("timeout-ms"),

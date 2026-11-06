@@ -173,3 +173,63 @@ test("CLI uses distinct clean, partial and missing-auth exit codes", (t) => {
   assert.equal(JSON.parse(result.stdout).authenticated, false);
   assert.doesNotMatch(result.stdout, /github_pat_|ghs_/);
 });
+
+test("CLI persists only explicitly supplied, validated analysis context", (t) => {
+  const f = fixture(t, { statuses: ["passed"], traces: false });
+  const contextPath = path.join(f.root, "analysis context.json");
+  const context = {
+    source: {
+      kind: "github-actions",
+      repository: "example/tests",
+      runId: "123",
+      runAttempt: 2,
+      commit: "abc123",
+      reportArtifactId: "456",
+    },
+    environment: "DEV",
+    region: "NA",
+  };
+  fs.writeFileSync(contextPath, JSON.stringify(context));
+  const args = [
+    "analyze",
+    "--report",
+    f.reportPath,
+    "--output",
+    f.outputDir,
+    "--small-model",
+    "small",
+    "--big-model",
+    "big",
+    "--context",
+    contextPath,
+  ];
+  const invocation = run(args);
+  assert.equal(invocation.status, 0, invocation.stdout + invocation.stderr);
+  const result = JSON.parse(invocation.stdout);
+  assert.equal(result.schemaVersion, 2);
+  assert.equal(result.runId, path.basename(result.runDir));
+  assert.deepEqual(result.source, context.source);
+  assert.equal(result.environment, "DEV");
+  assert.equal(result.region, "NA");
+  assert.deepEqual(
+    JSON.parse(
+      fs.readFileSync(path.join(result.runDir, "analysis-result.json"), "utf8"),
+    ),
+    result,
+  );
+  const previousRuns = fs.readdirSync(f.outputDir);
+  for (const content of [
+    "{",
+    " ".repeat(16 * 1024 + 1),
+    "null",
+    JSON.stringify({ token: "generated-context-secret" }),
+    JSON.stringify({ source: { kind: "unknown" } }),
+  ]) {
+    fs.writeFileSync(contextPath, content);
+    const failure = run(args);
+    assert.equal(failure.status, 1);
+    assert.equal(JSON.parse(failure.stdout).code, "INVALID_OPTIONS");
+    assert.doesNotMatch(failure.stdout, /generated-context-secret/);
+    assert.deepEqual(fs.readdirSync(f.outputDir), previousRuns);
+  }
+});
