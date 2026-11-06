@@ -2,10 +2,30 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { analyzeFailures, FailureAnalysisError } = require("../dist/analysis");
+const {
+  analyzeFailures,
+  FailureAnalysisError,
+  renderSummary,
+} = require("../dist/analysis");
 const analyzer = require("../dist/copilot-analyzer");
 const { measureCoverage, validateManifest } = require("../dist/reader");
-const { fixture, fakeClient } = require("./fixture.cjs");
+const {
+  fixture,
+  fakeClient,
+  attemptResponse,
+  groupingResponse,
+} = require("./fixture.cjs");
+
+const provisionalGrouping = {
+  ...groupingResponse,
+  evidenceRequests: [
+    {
+      issueIds: ["I1", "I2"],
+      sections: ["error-block"],
+      reason: "Compare generated evidence.",
+    },
+  ],
+};
 
 const options = (f) => ({
   reportPath: f.reportPath,
@@ -67,6 +87,305 @@ test("single attempt produces a summary without a grouping request", async (t) =
   assert.equal(result.grouping.status, "not-needed");
   assert.equal(sessions, 1);
   assert.ok(fs.existsSync(path.join(result.runDir, "summary.md")));
+});
+
+test("optional evidence failures preserve complete analysis with a safe visible warning", async (t) => {
+  const rawError = `private-token\n[private link](https://example.invalid)\n<script>private body</script>\n${"X".repeat(20000)}`;
+  for (const { name, grouping, followup, code, requests } of [
+    {
+      name: "per-lookup issue limit",
+      grouping: {
+        ...provisionalGrouping,
+        evidenceRequests: [
+          {
+            ...provisionalGrouping.evidenceRequests[0],
+            issueIds: Array.from({ length: 11 }, (_, i) => `I${i + 1}`),
+          },
+        ],
+      },
+      code: "issue-limit",
+      requests: 1,
+    },
+    {
+      name: "unknown requested issue",
+      grouping: {
+        ...provisionalGrouping,
+        evidenceRequests: [
+          {
+            ...provisionalGrouping.evidenceRequests[0],
+            issueIds: ["I99"],
+          },
+        ],
+      },
+      code: "invalid-request",
+      requests: 1,
+    },
+    {
+      name: "failed evidence call",
+      followup: new Error(rawError),
+      code: "followup-failed",
+      requests: 2,
+    },
+    {
+      name: "invalid evidence response",
+      followup: "not JSON",
+      code: "followup-failed",
+      requests: 2,
+    },
+    {
+      name: "second evidence round",
+      followup: provisionalGrouping,
+      code: "followup-failed",
+      requests: 2,
+    },
+  ]) {
+    await t.test(name, async (t) => {
+      const f = fixture(t, { tests: 2 });
+      mockClient(
+        t,
+        fakeClient({
+          responses: [
+            attemptResponse,
+            attemptResponse,
+            grouping ?? provisionalGrouping,
+            followup,
+          ],
+        }),
+      );
+      const result = await analyzeFailures(options(f));
+      assert.equal(result.status, "complete");
+      assert.equal(result.attempts.analyzed, 2);
+      assert.equal(result.grouping.status, "partial");
+      assert.equal(result.grouping.problemCount, 1);
+      assert.equal(result.grouping.diagnostics.stage, "complete");
+      assert.equal(result.grouping.diagnostics.evidenceErrorCode, code);
+      assert.equal(result.grouping.diagnostics.requestCount, requests);
+      assert.equal(result.grouping.diagnostics.repairAttempted, false);
+      assert.equal(result.warnings.length, 1);
+      assert.deepEqual(result.errors, []);
+      assert.deepEqual(
+        JSON.parse(
+          fs.readFileSync(path.join(result.runDir, "analysis-result.json")),
+        ),
+        JSON.parse(JSON.stringify(result)),
+      );
+      assert.match(
+        fs.readFileSync(
+          path.join(result.runDir, result.artifacts.groupedAnalysis),
+          "utf8",
+        ),
+        /\*\*Total: 2 = 2 extracted issues\*\*/,
+      );
+      const summary = fs.readFileSync(
+        path.join(result.runDir, "summary.md"),
+        "utf8",
+      );
+      assert.match(summary, /Status: \*\*complete\*\* \(with warnings\)/);
+      assert.match(summary, /## Warning/);
+      assert.match(summary, /Optional grouping evidence refinement failed/);
+      assert.match(summary, /saved grouping remains provisional/);
+      assert.doesNotMatch(
+        summary,
+        /private-token|private link|<script>|Generated check|Received: 503/,
+      );
+      assert.ok(Buffer.byteLength(summary, "utf8") < 16384);
+      if (followup instanceof Error) {
+        assert.equal(result.grouping.diagnostics.evidenceErrorMessage, rawError);
+        assert.doesNotMatch(result.warnings[0], /private-token|<script>/);
+      }
+      const untrustedSummary = renderSummary({
+        ...result,
+        warnings: [rawError],
+        grouping: {
+          ...result.grouping,
+          diagnostics: {
+            ...result.grouping.diagnostics,
+            evidenceErrorCode: rawError,
+            evidenceErrorMessage: rawError,
+          },
+        },
+      });
+      assert.doesNotMatch(untrustedSummary, /private-token|<script>|private link/);
+      assert.ok(Buffer.byteLength(untrustedSummary, "utf8") < 16384);
+    });
+  }
+});
+
+test("evidence warnings do not hide incomplete coverage, attempts or reference repair", async (t) => {
+  for (const scenario of [
+    {
+      name: "missing coverage",
+      prepare(f) {
+        f.report.files[0].tests[0].results.push({
+          status: "failed",
+          retry: 1,
+          attachments: [],
+        });
+        f.writeReport();
+      },
+      verify(result) {
+        assert.equal(result.coverage.missingAttempts.length, 1);
+      },
+    },
+    {
+      name: "omitted attempt",
+      tests: 3,
+      extra: { maxAttempts: 2 },
+      verify(result) {
+        assert.equal(result.attempts.omitted, 1);
+      },
+    },
+    {
+      name: "source-only fallback",
+      responses: [
+        "not JSON",
+        "not JSON",
+        attemptResponse,
+        provisionalGrouping,
+        new Error("Generated evidence failure"),
+      ],
+      verify(result) {
+        assert.equal(result.attempts.fallbacks, 1);
+      },
+    },
+    {
+      name: "unavailable attempt",
+      tests: 3,
+      failFirstSession: true,
+      verify(result) {
+        assert.equal(result.attempts.unavailable, 1);
+        assert.equal(result.errors[0].code, "ATTEMPT_FAILED");
+      },
+    },
+    ...[
+      { name: "missing reference", ids: ["I1"] },
+      { name: "duplicate reference", ids: ["I1", "I1", "I2"] },
+      { name: "unknown reference", ids: ["I1", "I2", "I404"] },
+    ].map(({ name, ids }) => ({
+      name,
+      responses: [
+        attemptResponse,
+        attemptResponse,
+        {
+          ...provisionalGrouping,
+          problems: [{ ...groupingResponse.problems[0], issueIds: ids }],
+        },
+        new Error("Generated repair failure"),
+      ],
+      verify(result) {
+        assert.match(
+          result.grouping.diagnostics.repairErrorMessage,
+          /Generated repair failure/,
+        );
+      },
+    })),
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const f = fixture(t, { tests: scenario.tests ?? 2 });
+      scenario.prepare?.(f);
+      let sessions = 0;
+      mockClient(
+        t,
+        fakeClient({
+          responses: scenario.responses ?? [
+            attemptResponse,
+            attemptResponse,
+            provisionalGrouping,
+            new Error("Generated evidence failure"),
+          ],
+          onCreate() {
+            if (scenario.failFirstSession && sessions++ === 0)
+              throw new Error("Generated attempt failure");
+          },
+        }),
+      );
+      const result = await analyzeFailures({
+        ...options(f),
+        concurrency: 1,
+        ...scenario.extra,
+      });
+      assert.equal(result.status, "partial");
+      assert.equal(result.grouping.status, "partial");
+      assert.ok(result.grouping.diagnostics.evidenceErrorMessage);
+      scenario.verify(result);
+    });
+  }
+});
+
+test("initial grouping failure is not downgraded to an optional evidence warning", async (t) => {
+  const f = fixture(t, { tests: 2 });
+  mockClient(
+    t,
+    fakeClient({
+      responses: [
+        attemptResponse,
+        attemptResponse,
+        new Error("Generated initial grouping failure"),
+      ],
+    }),
+  );
+  const result = await analyzeFailures(options(f));
+  assert.equal(result.status, "partial");
+  assert.equal(result.grouping.status, "failed");
+  assert.equal(result.errors[0].code, "GROUPING_FAILED");
+  assert.equal(result.artifacts.groupedAnalysis, undefined);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(result.runDir, "summary.md"), "utf8"),
+    /saved grouping remains provisional/,
+  );
+});
+
+test("cancellation during the optional evidence call remains cancellation", async (t) => {
+  const f = fixture(t, { tests: 2 });
+  const controller = new AbortController();
+  mockClient(
+    t,
+    fakeClient({
+      responses: [
+        attemptResponse,
+        attemptResponse,
+        provisionalGrouping,
+        () => {
+          controller.abort(new Error("Generated evidence cancellation"));
+          throw controller.signal.reason;
+        },
+      ],
+    }),
+  );
+  const result = await analyzeFailures({
+    ...options(f),
+    signal: controller.signal,
+  });
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.grouping.diagnostics.evidenceRoundAttempted, true);
+  assert.match(result.warnings.join("\n"), /Generated evidence cancellation/);
+});
+
+test("overall deadline during the optional evidence call remains partial", async (t) => {
+  const f = fixture(t, { tests: 2 });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(
+    analyzer,
+    "withCopilotAnalysisClient",
+    async (_models, _token, callback, { signal }) =>
+      callback(
+        fakeClient({
+          responses: [
+            attemptResponse,
+            attemptResponse,
+            provisionalGrouping,
+            () => {
+              t.mock.timers.tick(1000);
+              throw signal.reason;
+            },
+          ],
+        }),
+      ),
+  );
+  const result = await analyzeFailures({ ...options(f), timeoutMs: 1000 });
+  assert.equal(result.status, "partial");
+  assert.equal(result.grouping.diagnostics.evidenceRoundAttempted, true);
+  assert.match(result.warnings.join("\n"), /Overall analysis deadline exceeded/);
 });
 
 test("verified green report requires neither traces nor authentication", async (t) => {

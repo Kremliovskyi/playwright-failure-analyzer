@@ -123,8 +123,8 @@ test("grouping evidence obeys 6000 section and 48000 aggregate character limits"
               data: {
                 content: JSON.stringify({
                   ...response,
-                  evidenceRequests: Array.from({ length: 10 }, (_, i) => ({
-                    issueIds: ids.slice(i * 3, i * 3 + 3),
+                  evidenceRequests: Array.from({ length: 3 }, (_, i) => ({
+                    issueIds: ids.slice(i * 10, i * 10 + 10),
                     sections: ["error-block", "final-page", "test-source"],
                     reason: "Compare generated evidence",
                   })),
@@ -163,6 +163,107 @@ test("grouping evidence obeys 6000 section and 48000 aggregate character limits"
     48000,
   );
   assert.equal(result.diagnostics.evidenceIssueCount, 30);
+});
+
+test("evidence lookup and issue-reference limits enforce their exact boundaries", async (t) => {
+  for (const { name, sizes, code } of [
+    { name: "five issues", sizes: [5] },
+    { name: "ten issues", sizes: [10] },
+    { name: "eleven issues", sizes: [11], code: "issue-limit" },
+    { name: "ten lookups", sizes: Array(10).fill(1) },
+    { name: "eleven lookups", sizes: Array(11).fill(1), code: "request-limit" },
+    { name: "thirty references", sizes: [10, 10, 10] },
+    {
+      name: "thirty-one references",
+      sizes: [10, 10, 10, 1],
+      code: "reference-limit",
+    },
+  ]) {
+    await t.test(name, async (t) => {
+      const count = sizes.reduce((sum, size) => sum + size, 0);
+      const manifest = prepared(t, count);
+      const records = manifest.failures.map((entry) => ({
+        schemaVersion: 4,
+        model: "small",
+        attempt: { ...entry, spec: "" },
+        issues: [
+          {
+            blockIndex: 1,
+            source: { error: "Error", block: "Generated error evidence" },
+            analysis: explanation,
+          },
+        ],
+      }));
+      const ids = records.map((_, index) => `I${index + 1}`);
+      const final = {
+        summary: "Generated grouping",
+        problems: [
+          {
+            title: "Generated problem",
+            error: "Error",
+            failureExplanation: "Generated explanation",
+            issueIds: ids,
+          },
+        ],
+        evidenceRequests: [],
+      };
+      let offset = 0;
+      const evidenceRequests = sizes.map((size) => {
+        const issueIds = ids.slice(offset, offset + size);
+        offset += size;
+        return {
+          issueIds,
+          sections: ["error-block"],
+          reason: "Compare generated evidence",
+        };
+      });
+      let calls = 0;
+      const client = {
+        async createSession() {
+          return {
+            on() {
+              return () => {};
+            },
+            async disconnect() {},
+            async sendAndWait({ prompt }) {
+              calls++;
+              if (calls === 1) {
+                assert.match(prompt, /at most 10 evidence lookups/);
+                assert.match(prompt, /at most 10 distinct issueIds per lookup/);
+                assert.match(prompt, /30 issue references across all lookups/);
+                assert.match(prompt, /6000 characters per section/);
+                assert.match(prompt, /48000 section characters/);
+              }
+              return {
+                data: {
+                  content: JSON.stringify(
+                    calls === 1 ? { ...final, evidenceRequests } : final,
+                  ),
+                },
+              };
+            },
+          };
+        },
+      };
+      const result = await groupRun(
+        client,
+        manifest.runDir,
+        manifest,
+        records,
+        "small",
+        "big",
+      );
+      assert.equal(calls, code ? 1 : 2);
+      assert.equal(result.diagnostics.requestCount, calls);
+      assert.equal(result.diagnostics.evidenceErrorCode, code);
+      assert.equal(result.diagnostics.evidenceIssueCount, code ? 0 : count);
+      assert.equal(result.diagnostics.repairAttempted, false);
+      assert.match(
+        fs.readFileSync(result.filePath, "utf8"),
+        new RegExp(`\\*\\*Total: ${count} = ${count} extracted issues\\*\\*`),
+      );
+    });
+  }
 });
 
 test("oversized evidence file retains provisional grouping with a visible diagnostic", async (t) => {
@@ -229,6 +330,7 @@ test("oversized evidence file retains provisional grouping with a visible diagno
     result.diagnostics.evidenceErrorMessage,
     /exceeds 4194304 bytes/,
   );
+  assert.equal(result.diagnostics.evidenceErrorCode, "load-failed");
   assert.equal(result.problemCount, 1);
 });
 

@@ -21,7 +21,7 @@ import {
 const GROUPING_TIMEOUT_MS = 600000;
 const MAX_GROUPING_TEXT_CHARS = 1200;
 const MAX_EVIDENCE_REQUESTS = 10;
-const MAX_ISSUES_PER_EVIDENCE_REQUEST = 4;
+const MAX_ISSUES_PER_EVIDENCE_REQUEST = 10;
 const MAX_EVIDENCE_ISSUE_REFERENCES = 30;
 const MAX_EVIDENCE_SECTION_CHARS = 6000;
 const MAX_EVIDENCE_TOTAL_CHARS = 48000;
@@ -118,6 +118,13 @@ export interface GroupingDiagnostics {
   evidenceIssueCount: number;
   evidenceBytes: number;
   evidenceErrorMessage?: string;
+  evidenceErrorCode?:
+    | "request-limit"
+    | "issue-limit"
+    | "reference-limit"
+    | "invalid-request"
+    | "load-failed"
+    | "followup-failed";
   omittedIssueCountBeforeRepair: number;
   omittedIssueCountAfterRepair: number;
   unknownIssueCountBeforeRepair: number;
@@ -145,6 +152,16 @@ export class GroupingRunError extends Error {
   ) {
     super(message);
     this.name = "GroupingRunError";
+  }
+}
+
+class EvidenceRequestError extends Error {
+  constructor(
+    readonly code: NonNullable<GroupingDiagnostics["evidenceErrorCode"]>,
+    message: string,
+  ) {
+    super(message);
+    this.name = "EvidenceRequestError";
   }
 }
 
@@ -267,6 +284,8 @@ Rules:
 - Explain the expected and observed behavior and why the assertion or action failed. Include a cause when directly supported by evidence; otherwise do not speculate about one.
 - Return a complete provisional grouping even when requesting evidence.
 - Request evidence only for a plausible merge that cannot be decided from the structured fields. Use only: error-block, final-page, test-source, network.
+- Request at most ${MAX_EVIDENCE_REQUESTS} evidence lookups, with at most ${MAX_ISSUES_PER_EVIDENCE_REQUEST} distinct issueIds per lookup and ${MAX_EVIDENCE_ISSUE_REFERENCES} issue references across all lookups. Repeated issues in different lookups count toward that total.
+- Evidence is limited to ${MAX_EVIDENCE_SECTION_CHARS} characters per section and ${MAX_EVIDENCE_TOTAL_CHARS} section characters across the entire evidence round. Prioritize the most useful issues and sections; later sections may be unavailable when the budget is exhausted.
 - If no evidence is needed, return an empty evidenceRequests array.
 - Do not add status history, comparison, products, bugs, defects, action items, recommendations, or ADO content.
 - Do not create Markdown. The application renders the report after validating your JSON.
@@ -344,7 +363,8 @@ const validateEvidenceRequests = (
   catalog: IssueCatalogEntry[],
 ): ModelEvidenceRequest[] => {
   if (requests.length > MAX_EVIDENCE_REQUESTS)
-    throw new Error(
+    throw new EvidenceRequestError(
+      "request-limit",
       `Grouping requested ${requests.length} evidence lookups; maximum is ${MAX_EVIDENCE_REQUESTS}`,
     );
   const allowedIssueIds = new Set(catalog.map((entry) => entry.issueId));
@@ -353,7 +373,8 @@ const validateEvidenceRequests = (
     const issueIds = [...new Set(request.issueIds)];
     const sections = [...new Set(request.sections)];
     if (issueIds.length > MAX_ISSUES_PER_EVIDENCE_REQUEST) {
-      throw new Error(
+      throw new EvidenceRequestError(
+        "issue-limit",
         `Evidence request ${index + 1} contains ${issueIds.length} issues; maximum is ${MAX_ISSUES_PER_EVIDENCE_REQUEST}`,
       );
     }
@@ -361,14 +382,16 @@ const validateEvidenceRequests = (
       (issueId) => !allowedIssueIds.has(issueId),
     );
     if (unknownIssueId)
-      throw new Error(
+      throw new EvidenceRequestError(
+        "invalid-request",
         `Evidence request references unknown issue ${unknownIssueId}`,
       );
     issueReferenceCount += issueIds.length;
     return { ...request, issueIds, sections };
   });
   if (issueReferenceCount > MAX_EVIDENCE_ISSUE_REFERENCES) {
-    throw new Error(
+    throw new EvidenceRequestError(
+      "reference-limit",
       `Grouping requested evidence for ${issueReferenceCount} issue references; maximum is ${MAX_EVIDENCE_ISSUE_REFERENCES}`,
     );
   }
@@ -1119,6 +1142,9 @@ export const groupRun = async (
           diagnostics.evidenceRoundAttempted = true;
           diagnostics.evidenceRequestCount =
             parsedResponse.evidenceRequests.length;
+          let evidenceErrorCode: NonNullable<
+            GroupingDiagnostics["evidenceErrorCode"]
+          > = "invalid-request";
           try {
             const provisionalValidation = validateModelGroupingReferences(
               parsedResponse,
@@ -1133,6 +1159,7 @@ export const groupRun = async (
               parsedResponse.evidenceRequests,
               issueCatalog,
             );
+            evidenceErrorCode = "load-failed";
             const loadedEvidence = loadRequestedEvidence(
               runDir,
               issueCatalog,
@@ -1150,6 +1177,7 @@ export const groupRun = async (
               "utf8",
             );
             diagnostics.stage = "evidence-request";
+            evidenceErrorCode = "followup-failed";
             assertNotAborted(options.signal);
             const evidenceResult = await session.sendAndWait(
               { prompt: evidencePrompt },
@@ -1169,6 +1197,10 @@ export const groupRun = async (
               );
             parsedResponse = finalResponse;
           } catch (evidenceError) {
+            diagnostics.evidenceErrorCode =
+              evidenceError instanceof EvidenceRequestError
+                ? evidenceError.code
+                : evidenceErrorCode;
             diagnostics.evidenceErrorMessage =
               diagnostics.evidenceErrorMessage ||
               (evidenceError instanceof Error

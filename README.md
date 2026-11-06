@@ -87,13 +87,21 @@ nonzero.
 
 | Exit code | Meaning                                                                       |
 | --------- | ----------------------------------------------------------------------------- |
-| 0         | Complete analysis or verified no failures                                     |
+| 0         | Complete analysis (possibly with warnings) or verified no failures           |
 | 1         | Invalid arguments, authentication failure, fatal preparation/output error     |
 | 2         | Partial analysis, missing/unknown coverage, source-only fallback, or deadline |
 | 130 / 143 | SIGINT / SIGTERM cancellation                                                 |
 
 The CLI's exit code describes analysis, not the original Playwright test result.
 Do not use it to turn a failing regression run green.
+
+An optional grouping evidence request or follow-up can fail without making the
+analysis incomplete. If coverage and attempt analysis are complete, the grouping
+references are valid, and the report was saved, the result stays `complete` and
+the CLI exits 0. The grouping remains `partial` (provisional), with a warning in
+`summary.md` and full diagnostics in `analysis-result.json`. Missing coverage,
+failed/omitted attempts, source-only fallbacks, reference-repair failures, fatal
+errors, deadlines, and cancellation retain their non-success behavior.
 
 ## Authentication
 
@@ -241,8 +249,20 @@ failure-analysis/
   low-confidence source-only issues with a warning and partial run status.
 - Grouping uses one bounded evidence round and one reference repair, preserving
   valid issues and explicitly recording provisional/unclassified results.
+- Evidence requests allow up to 10 lookups, 10 distinct issues per lookup, and 30
+  issue references across all lookups. Repeated issues in different lookups count
+  toward the total. These limits are included in the grouping prompt.
+- Requested source sections are limited to 6,000 characters each and 48,000
+  section characters in total; exhausted budgets can leave later sections
+  unavailable. These character limits are not a cap on total model context or
+  tokens. Each source file retains its 4 MiB read limit.
+- Evidence refinement failures retain the provisional report and record
+  `evidenceErrorCode` and `evidenceErrorMessage` in grouping diagnostics. Warning
+  summaries use fixed descriptions of the failure category, not raw diagnostic
+  messages.
 - `summary.md` is deterministic, including zero/single-attempt and failed runs.
-  It includes counts/status only, not test names, source blocks, or network bodies.
+  It includes counts/status and bounded evidence-refinement warnings, not test
+  names, source blocks, network bodies, or raw diagnostic messages.
 - Grouped Markdown exists only when grouping produces a valid artifact.
 - `attemptUsage` contains token counts only when the SDK reports them. Grouping
   usage is recorded in its diagnostics; neither is a currency/billing estimate.

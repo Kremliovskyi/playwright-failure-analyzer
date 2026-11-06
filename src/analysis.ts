@@ -104,11 +104,49 @@ export class FailureAnalysisError extends AnalysisError {
   }
 }
 
+function groupingEvidenceWarning(
+  diagnostics: GroupRunResult["diagnostics"],
+): string {
+  let reason: string;
+  switch (diagnostics.evidenceErrorCode) {
+    case "request-limit":
+      reason = "The model requested too many evidence lookups.";
+      break;
+    case "issue-limit":
+      reason = "An evidence lookup exceeded the per-lookup issue limit.";
+      break;
+    case "reference-limit":
+      reason = "The evidence lookups exceeded the total issue-reference limit.";
+      break;
+    case "invalid-request":
+      reason = "The model's evidence request could not be validated.";
+      break;
+    case "load-failed":
+      reason = "The requested source evidence could not be loaded.";
+      break;
+    case "followup-failed":
+      reason = "The model's evidence follow-up did not complete successfully.";
+      break;
+    default:
+      reason = "The optional evidence could not be retrieved or processed.";
+  }
+  return `Optional grouping evidence refinement failed. ${reason} The saved grouping remains provisional. See the restricted diagnostics for details.`;
+}
+
 export function renderSummary(result: AnalysisResult): string {
+  const diagnostics = result.grouping.diagnostics;
+  const evidenceWarning =
+    result.artifacts.groupedAnalysis && diagnostics?.evidenceErrorMessage
+      ? groupingEvidenceWarning(diagnostics)
+      : undefined;
   return [
     "# Playwright Failure Analysis",
     "",
-    `Status: **${result.status}**`,
+    `Status: **${result.status}**${
+      result.status === "complete" && result.warnings.length
+        ? " (with warnings)"
+        : ""
+    }`,
     "",
     "| Metric | Count |",
     "| --- | ---: |",
@@ -125,6 +163,7 @@ export function renderSummary(result: AnalysisResult): string {
     `Coverage: ${result.coverage.known ? "known" : "unknown"}.`,
     `Grouping: ${result.grouping.status}.`,
     `Warnings: ${result.warnings.length}. Errors: ${result.errors.length}.`,
+    ...(evidenceWarning ? ["", "## Warning", "", evidenceWarning] : []),
     "",
     "See analysis-result.json and the restricted evidence artifacts for details.",
     "This summary deliberately omits test names, source code, and network bodies.",
@@ -205,6 +244,7 @@ export async function analyzeFailures(
         );
   const signal = controller.signal;
   let result: AnalysisResult | undefined;
+  let incompleteGrouping = false;
   let stage = "preparation";
   const save = () => {
     if (!result) return;
@@ -366,10 +406,15 @@ export async function analyzeFailures(
                 { signal },
               );
               const d = grouping.diagnostics;
-              const partial = !!(
-                d.evidenceErrorMessage ||
+              incompleteGrouping = !!(
                 d.repairErrorMessage ||
                 d.omittedIssueCountAfterRepair ||
+                d.unknownIssueCountAfterRepair ||
+                d.duplicateIssueCountAfterRepair
+              );
+              const partial = !!(
+                d.evidenceErrorMessage ||
+                incompleteGrouping ||
                 analysis.failed ||
                 analysis.omitted
               );
@@ -379,10 +424,12 @@ export async function analyzeFailures(
                 diagnostics: d,
               };
               current.artifacts.groupedAnalysis = grouping.fileName;
-              if (partial)
+              if (incompleteGrouping || analysis.failed || analysis.omitted)
                 current.warnings.push(
                   "Grouping retained partial or provisional evidence; inspect diagnostics.",
                 );
+              if (d.evidenceErrorMessage)
+                current.warnings.push(groupingEvidenceWarning(d));
             } catch (error) {
               current.grouping = {
                 status: "failed",
@@ -405,7 +452,16 @@ export async function analyzeFailures(
     if (signal.aborted) {
       result.warnings.push(messageOf(signal.reason));
       result.status = options.signal?.aborted ? "cancelled" : "partial";
-    } else if (result.warnings.length || result.errors.length) {
+    } else if (
+      !coverage.known ||
+      coverage.warnings.length ||
+      coverage.missingAttempts.length ||
+      result.attempts.unavailable ||
+      result.attempts.omitted ||
+      result.attempts.fallbacks ||
+      incompleteGrouping ||
+      result.errors.length
+    ) {
       result.status = "partial";
     } else if (
       coverage.known &&

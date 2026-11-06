@@ -17,7 +17,8 @@ const help = `Usage:
 
 Credentials: COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN, then local login.
 CI disables stored-login fallback. Evidence is not automatically redacted.
-Exit: 0 complete/no failures, 1 fatal error, 2 partial, 130/143 cancelled.
+Exit: 0 complete (possibly with warnings)/no failures, 1 fatal error, 2 partial, 130/143 cancelled.
+Optional grouping evidence failure alone is a warning; provisional grouping is retained.
 `;
 
 export async function runCli(args = process.argv.slice(2)): Promise<number> {

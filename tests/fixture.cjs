@@ -146,6 +146,25 @@ const explanation = {
   confidence: "high",
 };
 
+const attemptResponse = {
+  schemaVersion: 4,
+  issues: [{ blockIndex: 1, analysis: explanation }],
+};
+
+const groupingResponse = {
+  summary: "One generated problem.",
+  problems: [
+    {
+      title: "Status mismatch",
+      error: "Unexpected status",
+      failureExplanation:
+        "The observed status differs from the expected status.",
+      issueIds: ["I1", "I2"],
+    },
+  ],
+  evidenceRequests: [],
+};
+
 function fakeClient({ responses, delay = 0, onCreate = () => {} } = {}) {
   let next = 0;
   return {
@@ -161,24 +180,10 @@ function fakeClient({ responses, delay = 0, onCreate = () => {} } = {}) {
           const response = responses
             ? responses[Math.min(next++, responses.length - 1)]
             : config.model === "big"
-              ? {
-                  summary: "One generated problem.",
-                  problems: [
-                    {
-                      title: "Status mismatch",
-                      error: "Unexpected status",
-                      failureExplanation:
-                        "The observed status differs from the expected status.",
-                      issueIds: ["I1", "I2"],
-                    },
-                  ],
-                  evidenceRequests: [],
-                }
-              : {
-                  schemaVersion: 4,
-                  issues: [{ blockIndex: 1, analysis: explanation }],
-                };
+              ? groupingResponse
+              : attemptResponse;
           if (response instanceof Error) throw response;
+          if (typeof response === "function") return response();
           return {
             data: {
               content:
@@ -193,4 +198,12 @@ function fakeClient({ responses, delay = 0, onCreate = () => {} } = {}) {
   };
 }
 
-module.exports = { fixture, fakeClient, errorBlock, errorMd, explanation };
+module.exports = {
+  fixture,
+  fakeClient,
+  errorBlock,
+  errorMd,
+  explanation,
+  attemptResponse,
+  groupingResponse,
+};

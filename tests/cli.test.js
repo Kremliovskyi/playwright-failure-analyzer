@@ -1,9 +1,17 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { version } = require("../package.json");
-const { fixture } = require("./fixture.cjs");
+const { runCli } = require("../dist/cli");
+const analyzer = require("../dist/copilot-analyzer");
+const {
+  fixture,
+  fakeClient,
+  attemptResponse,
+  groupingResponse,
+} = require("./fixture.cjs");
 
 const cli = path.resolve(__dirname, "../dist/cli.js");
 function run(args) {
@@ -21,8 +29,83 @@ function run(args) {
 }
 
 test("CLI help/version work without credentials", () => {
-  assert.match(run(["--help"]).stdout, /Usage:/);
+  const help = run(["--help"]).stdout;
+  assert.match(help, /Usage:/);
+  assert.match(help, /complete \(possibly with warnings\)/);
+  assert.match(help, /Optional grouping evidence failure alone is a warning/);
   assert.equal(run(["--version"]).stdout.trim(), version);
+});
+
+test("CLI exits zero for evidence-only warnings but preserves incomplete coverage exits", async (t) => {
+  for (const missingCoverage of [false, true]) {
+    await t.test(
+      missingCoverage ? "incomplete coverage" : "warning only",
+      async (t) => {
+        const f = fixture(t, { tests: 2 });
+        if (missingCoverage) {
+          f.report.files[0].tests[0].results.push({
+            status: "failed",
+            retry: 1,
+            attachments: [],
+          });
+          f.writeReport();
+        }
+        const client = fakeClient({
+          responses: [
+            attemptResponse,
+            attemptResponse,
+            {
+              ...groupingResponse,
+              evidenceRequests: [
+                {
+                  issueIds: ["I1", "I2"],
+                  sections: ["error-block"],
+                  reason: "Compare generated evidence",
+                },
+              ],
+            },
+            new Error("Generated optional evidence failure"),
+          ],
+        });
+        t.mock.method(
+          analyzer,
+          "withCopilotAnalysisClient",
+          async (_models, _token, callback) => callback(client),
+        );
+        let stdout = "";
+        const writeStdout = process.stdout.write.bind(process.stdout);
+        t.mock.method(process.stdout, "write", (chunk, ...args) => {
+          if (typeof chunk !== "string") return writeStdout(chunk, ...args);
+          stdout += chunk;
+          return true;
+        });
+        t.mock.method(process.stderr, "write", () => true);
+        const code = await runCli([
+          "analyze",
+          "--report",
+          f.reportPath,
+          "--output",
+          f.outputDir,
+          "--small-model",
+          "small",
+          "--big-model",
+          "big",
+        ]);
+        assert.equal(code, missingCoverage ? 2 : 0);
+        const result = JSON.parse(stdout);
+        assert.equal(result.status, missingCoverage ? "partial" : "complete");
+        assert.equal(result.grouping.status, "partial");
+        assert.equal(
+          result.grouping.diagnostics.evidenceErrorCode,
+          "followup-failed",
+        );
+        assert.match(
+          fs.readFileSync(path.join(result.runDir, "summary.md"), "utf8"),
+          /Optional grouping evidence refinement failed/,
+        );
+      },
+    );
+  }
 });
 
 test("CLI rejects invalid arguments as machine-readable errors", () => {
