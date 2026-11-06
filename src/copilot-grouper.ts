@@ -56,7 +56,7 @@ interface ModelGroupingProblem {
 interface ModelGroupingResponse {
   summary: string;
   problems: ModelGroupingProblem[];
-  evidenceRequests: ModelEvidenceRequest[];
+  evidenceRequests: unknown;
 }
 
 type EvidenceSection = "error-block" | "final-page" | "test-source" | "network";
@@ -664,7 +664,16 @@ const parseModelGroupingResponse = (text: string): ModelGroupingResponse => {
     };
   });
 
-  const evidenceRequestValues = response.evidenceRequests ?? [];
+  return {
+    summary: response.summary.trim(),
+    problems,
+    evidenceRequests: response.evidenceRequests ?? [],
+  };
+};
+
+const parseEvidenceRequests = (
+  evidenceRequestValues: unknown,
+): ModelEvidenceRequest[] => {
   if (!Array.isArray(evidenceRequestValues))
     throw new Error("Grouping evidenceRequests is not an array");
   const allowedSections = new Set<EvidenceSection>([
@@ -673,7 +682,7 @@ const parseModelGroupingResponse = (text: string): ModelGroupingResponse => {
     "test-source",
     "network",
   ]);
-  const evidenceRequests = evidenceRequestValues.map((value, requestIndex) => {
+  return evidenceRequestValues.map((value, requestIndex) => {
     if (typeof value !== "object" || value === null)
       throw new Error(`Evidence request ${requestIndex + 1} is not an object`);
     const request = value as Record<string, unknown>;
@@ -699,7 +708,6 @@ const parseModelGroupingResponse = (text: string): ModelGroupingResponse => {
     };
   });
 
-  return { summary: response.summary.trim(), problems, evidenceRequests };
 };
 
 const validateModelGroupingReferences = (
@@ -1138,14 +1146,24 @@ export const groupRun = async (
         diagnostics.responseBytes = Buffer.byteLength(content, "utf8");
         diagnostics.stage = "parse";
         let parsedResponse = parseModelGroupingResponse(content);
-        if (parsedResponse.evidenceRequests.length) {
+        if (
+          !Array.isArray(parsedResponse.evidenceRequests) ||
+          parsedResponse.evidenceRequests.length
+        ) {
           diagnostics.evidenceRoundAttempted = true;
-          diagnostics.evidenceRequestCount =
-            parsedResponse.evidenceRequests.length;
+          diagnostics.evidenceRequestCount = Array.isArray(
+            parsedResponse.evidenceRequests,
+          )
+            ? parsedResponse.evidenceRequests.length
+            : 0;
           let evidenceErrorCode: NonNullable<
             GroupingDiagnostics["evidenceErrorCode"]
           > = "invalid-request";
           try {
+            const requestedEvidence = parseEvidenceRequests(
+              parsedResponse.evidenceRequests,
+            );
+            parsedResponse.evidenceRequests = requestedEvidence;
             const provisionalValidation = validateModelGroupingReferences(
               parsedResponse,
               issueCatalog,
@@ -1156,7 +1174,7 @@ export const groupRun = async (
               );
             }
             const evidenceRequests = validateEvidenceRequests(
-              parsedResponse.evidenceRequests,
+              requestedEvidence,
               issueCatalog,
             );
             evidenceErrorCode = "load-failed";
@@ -1191,7 +1209,7 @@ export const groupRun = async (
             diagnostics.stage = "evidence-parse";
             const finalResponse = parseModelGroupingResponse(evidenceContent);
             diagnostics.stage = "evidence-validate";
-            if (finalResponse.evidenceRequests.length)
+            if (parseEvidenceRequests(finalResponse.evidenceRequests).length)
               throw new Error(
                 "Final grouping requested a second evidence round",
               );
@@ -1252,7 +1270,7 @@ export const groupRun = async (
             );
             diagnostics.stage = "repair-parse";
             const repairedResponse = parseModelGroupingResponse(repairContent);
-            if (repairedResponse.evidenceRequests.length)
+            if (parseEvidenceRequests(repairedResponse.evidenceRequests).length)
               throw new Error("Reference repair cannot request more evidence");
             diagnostics.stage = "repair-validate";
             const repairedValidation = validateModelGroupingReferences(

@@ -120,6 +120,46 @@ test("optional evidence failures preserve complete analysis with a safe visible 
       code: "invalid-request",
       requests: 1,
     },
+    ...[
+      {
+        name: "non-array evidence requests",
+        evidenceRequests: provisionalGrouping.evidenceRequests[0],
+      },
+      {
+        name: "null evidence request",
+        evidenceRequests: [null],
+      },
+      {
+        name: "unsupported evidence section",
+        evidenceRequests: [
+          {
+            ...provisionalGrouping.evidenceRequests[0],
+            sections: ["screenshot"],
+          },
+        ],
+      },
+      {
+        name: "missing evidence reason",
+        evidenceRequests: [
+          { issueIds: ["I1", "I2"], sections: ["error-block"] },
+        ],
+      },
+      {
+        name: "empty evidence issue list",
+        evidenceRequests: [
+          { ...provisionalGrouping.evidenceRequests[0], issueIds: [] },
+        ],
+      },
+      {
+        name: "mixed valid and malformed requests",
+        evidenceRequests: [...provisionalGrouping.evidenceRequests, null],
+      },
+    ].map(({ name, evidenceRequests }) => ({
+      name,
+      grouping: { ...groupingResponse, evidenceRequests },
+      code: "invalid-request",
+      requests: 1,
+    })),
     {
       name: "failed evidence call",
       followup: new Error(rawError),
@@ -127,8 +167,29 @@ test("optional evidence failures preserve complete analysis with a safe visible 
       requests: 2,
     },
     {
+      name: "empty evidence error message",
+      followup: new Error(""),
+      code: "followup-failed",
+      requests: 2,
+    },
+    {
       name: "invalid evidence response",
       followup: "not JSON",
+      code: "followup-failed",
+      requests: 2,
+    },
+    {
+      name: "malformed requests in evidence follow-up",
+      followup: {
+        ...groupingResponse,
+        problems: [
+          {
+            ...groupingResponse.problems[0],
+            title: "Discarded follow-up grouping",
+          },
+        ],
+        evidenceRequests: [{}],
+      },
       code: "followup-failed",
       requests: 2,
     },
@@ -169,13 +230,12 @@ test("optional evidence failures preserve complete analysis with a safe visible 
         ),
         JSON.parse(JSON.stringify(result)),
       );
-      assert.match(
-        fs.readFileSync(
-          path.join(result.runDir, result.artifacts.groupedAnalysis),
-          "utf8",
-        ),
-        /\*\*Total: 2 = 2 extracted issues\*\*/,
+      const grouped = fs.readFileSync(
+        path.join(result.runDir, result.artifacts.groupedAnalysis),
+        "utf8",
       );
+      assert.match(grouped, /\*\*Total: 2 = 2 extracted issues\*\*/);
+      assert.doesNotMatch(grouped, /Discarded follow-up grouping/);
       const summary = fs.readFileSync(
         path.join(result.runDir, "summary.md"),
         "utf8",
@@ -190,7 +250,10 @@ test("optional evidence failures preserve complete analysis with a safe visible 
       );
       assert.ok(Buffer.byteLength(summary, "utf8") < 16384);
       if (followup instanceof Error) {
-        assert.equal(result.grouping.diagnostics.evidenceErrorMessage, rawError);
+        assert.equal(
+          result.grouping.diagnostics.evidenceErrorMessage,
+          followup.message,
+        );
         assert.doesNotMatch(result.warnings[0], /private-token|<script>/);
       }
       const untrustedSummary = renderSummary({
@@ -207,6 +270,18 @@ test("optional evidence failures preserve complete analysis with a safe visible 
       });
       assert.doesNotMatch(untrustedSummary, /private-token|<script>|private link/);
       assert.ok(Buffer.byteLength(untrustedSummary, "utf8") < 16384);
+      for (const diagnostics of [
+        { evidenceErrorCode: code },
+        { evidenceErrorMessage: "" },
+      ]) {
+        assert.match(
+          renderSummary({
+            ...result,
+            grouping: { ...result.grouping, diagnostics },
+          }),
+          /## Warning/,
+        );
+      }
     });
   }
 });
@@ -279,6 +354,32 @@ test("evidence warnings do not hide incomplete coverage, attempts or reference r
         );
       },
     })),
+    {
+      name: "malformed evidence request with empty reference-repair error",
+      responses: [
+        attemptResponse,
+        attemptResponse,
+        {
+          ...groupingResponse,
+          problems: [
+            {
+              ...groupingResponse.problems[0],
+              issueIds: ["I1", "I1", "I2"],
+            },
+          ],
+          evidenceRequests: {},
+        },
+        new Error(""),
+      ],
+      verify(result) {
+        assert.equal(
+          result.grouping.diagnostics.evidenceErrorCode,
+          "invalid-request",
+        );
+        assert.equal(result.grouping.diagnostics.repairAttempted, true);
+        assert.equal(result.grouping.diagnostics.repairErrorMessage, "");
+      },
+    },
   ]) {
     await t.test(scenario.name, async (t) => {
       const f = fixture(t, { tests: scenario.tests ?? 2 });
@@ -313,26 +414,41 @@ test("evidence warnings do not hide incomplete coverage, attempts or reference r
 });
 
 test("initial grouping failure is not downgraded to an optional evidence warning", async (t) => {
-  const f = fixture(t, { tests: 2 });
-  mockClient(
-    t,
-    fakeClient({
-      responses: [
-        attemptResponse,
-        attemptResponse,
-        new Error("Generated initial grouping failure"),
-      ],
-    }),
-  );
-  const result = await analyzeFailures(options(f));
-  assert.equal(result.status, "partial");
-  assert.equal(result.grouping.status, "failed");
-  assert.equal(result.errors[0].code, "GROUPING_FAILED");
-  assert.equal(result.artifacts.groupedAnalysis, undefined);
-  assert.doesNotMatch(
-    fs.readFileSync(path.join(result.runDir, "summary.md"), "utf8"),
-    /saved grouping remains provisional/,
-  );
+  for (const [name, grouping] of [
+    ["request failure", new Error("Generated initial grouping failure")],
+    ["invalid JSON", "not JSON"],
+    [
+      "missing summary",
+      { problems: groupingResponse.problems, evidenceRequests: {} },
+    ],
+    [
+      "invalid core and optional request",
+      {
+        ...groupingResponse,
+        problems: [{ ...groupingResponse.problems[0], issueIds: [] }],
+        evidenceRequests: {},
+      },
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const f = fixture(t, { tests: 2 });
+      mockClient(
+        t,
+        fakeClient({
+          responses: [attemptResponse, attemptResponse, grouping],
+        }),
+      );
+      const result = await analyzeFailures(options(f));
+      assert.equal(result.status, "partial");
+      assert.equal(result.grouping.status, "failed");
+      assert.equal(result.errors[0].code, "GROUPING_FAILED");
+      assert.equal(result.artifacts.groupedAnalysis, undefined);
+      assert.doesNotMatch(
+        fs.readFileSync(path.join(result.runDir, "summary.md"), "utf8"),
+        /saved grouping remains provisional/,
+      );
+    });
+  }
 });
 
 test("cancellation during the optional evidence call remains cancellation", async (t) => {

@@ -105,8 +105,14 @@ export class FailureAnalysisError extends AnalysisError {
 }
 
 function groupingEvidenceWarning(
-  diagnostics: GroupRunResult["diagnostics"],
-): string {
+  diagnostics: GroupRunResult["diagnostics"] | undefined,
+): string | undefined {
+  if (
+    !diagnostics ||
+    (diagnostics.evidenceErrorCode === undefined &&
+      diagnostics.evidenceErrorMessage === undefined)
+  )
+    return undefined;
   let reason: string;
   switch (diagnostics.evidenceErrorCode) {
     case "request-limit":
@@ -134,11 +140,9 @@ function groupingEvidenceWarning(
 }
 
 export function renderSummary(result: AnalysisResult): string {
-  const diagnostics = result.grouping.diagnostics;
-  const evidenceWarning =
-    result.artifacts.groupedAnalysis && diagnostics?.evidenceErrorMessage
-      ? groupingEvidenceWarning(diagnostics)
-      : undefined;
+  const evidenceWarning = result.artifacts.groupedAnalysis
+    ? groupingEvidenceWarning(result.grouping.diagnostics)
+    : undefined;
   return [
     "# Playwright Failure Analysis",
     "",
@@ -406,14 +410,15 @@ export async function analyzeFailures(
                 { signal },
               );
               const d = grouping.diagnostics;
+              const evidenceWarning = groupingEvidenceWarning(d);
               incompleteGrouping = !!(
-                d.repairErrorMessage ||
+                d.repairErrorMessage !== undefined ||
                 d.omittedIssueCountAfterRepair ||
                 d.unknownIssueCountAfterRepair ||
                 d.duplicateIssueCountAfterRepair
               );
               const partial = !!(
-                d.evidenceErrorMessage ||
+                evidenceWarning ||
                 incompleteGrouping ||
                 analysis.failed ||
                 analysis.omitted
@@ -428,8 +433,7 @@ export async function analyzeFailures(
                 current.warnings.push(
                   "Grouping retained partial or provisional evidence; inspect diagnostics.",
                 );
-              if (d.evidenceErrorMessage)
-                current.warnings.push(groupingEvidenceWarning(d));
+              if (evidenceWarning) current.warnings.push(evidenceWarning);
             } catch (error) {
               current.grouping = {
                 status: "failed",

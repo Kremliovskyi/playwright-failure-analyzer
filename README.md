@@ -103,6 +103,10 @@ the CLI exits 0. The grouping remains `partial` (provisional), with a warning in
 failed/omitted attempts, source-only fallbacks, reference-repair failures, fatal
 errors, deadlines, and cancellation retain their non-success behavior.
 
+Malformed optional request fields and failures with empty diagnostic messages
+follow this same warning-only behavior. Invalid core grouping JSON or fields
+still fail grouping; they are not treated as optional evidence failures.
+
 ## Authentication
 
 Resolution order:

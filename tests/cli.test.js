@@ -37,9 +37,38 @@ test("CLI help/version work without credentials", () => {
 });
 
 test("CLI exits zero for evidence-only warnings but preserves incomplete coverage exits", async (t) => {
-  for (const missingCoverage of [false, true]) {
+  const evidenceRequests = [
+    {
+      issueIds: ["I1", "I2"],
+      sections: ["error-block"],
+      reason: "Compare generated evidence",
+    },
+  ];
+  const scenarios = [
+    {
+      name: "failed evidence call",
+      evidenceRequests,
+      followup: new Error("Generated optional evidence failure"),
+      errorCode: "followup-failed",
+    },
+    {
+      name: "empty evidence error message",
+      evidenceRequests,
+      followup: new Error(""),
+      errorCode: "followup-failed",
+    },
+    {
+      name: "malformed evidence request",
+      evidenceRequests: [{ issueIds: ["I1", "I2"], sections: ["screenshot"] }],
+      errorCode: "invalid-request",
+    },
+  ].flatMap((scenario) =>
+    [false, true].map((missingCoverage) => ({ ...scenario, missingCoverage })),
+  );
+  for (const scenario of scenarios) {
+    const { missingCoverage } = scenario;
     await t.test(
-      missingCoverage ? "incomplete coverage" : "warning only",
+      `${scenario.name}: ${missingCoverage ? "incomplete coverage" : "warning only"}`,
       async (t) => {
         const f = fixture(t, { tests: 2 });
         if (missingCoverage) {
@@ -56,15 +85,9 @@ test("CLI exits zero for evidence-only warnings but preserves incomplete coverag
             attemptResponse,
             {
               ...groupingResponse,
-              evidenceRequests: [
-                {
-                  issueIds: ["I1", "I2"],
-                  sections: ["error-block"],
-                  reason: "Compare generated evidence",
-                },
-              ],
+              evidenceRequests: scenario.evidenceRequests,
             },
-            new Error("Generated optional evidence failure"),
+            scenario.followup,
           ],
         });
         t.mock.method(
@@ -97,7 +120,7 @@ test("CLI exits zero for evidence-only warnings but preserves incomplete coverag
         assert.equal(result.grouping.status, "partial");
         assert.equal(
           result.grouping.diagnostics.evidenceErrorCode,
-          "followup-failed",
+          scenario.errorCode,
         );
         assert.match(
           fs.readFileSync(path.join(result.runDir, "summary.md"), "utf8"),
